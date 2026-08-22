@@ -1,11 +1,11 @@
 [
   {
-    "filename": "cyberpunk_city.png",
-    "prompt": "Futuristic neon cyberpunk cityscape at midnight, ultra-detailed, 8k"
+    "filename": "cyberpunk_panther.png",
+    "prompt": "A cybernetic black panther with glowing cyan circuitry stripes on dark studio background, 8k resolution"
   },
   {
-    "filename": "cyberpunk_city_rain.png",
-    "referenceImage": "cyberpunk_city.png",
-    "prompt": "Based on the attached reference image, add torrential neon rain and flying hovercars"
+    "filename": "cyberpunk_panther_leap.png",
+    "referenceImage": "cyberpunk_panther.png",
+    "prompt": "Based on the attached reference image, generate the cybernetic panther leaping forward in mid-air with glowing energy trails"
   }
 ]

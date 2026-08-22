@@ -1,14 +1,15 @@
-#!/usr/bin/env node
 // ============================================================================
-// gemini_bridge.js - Universal Chrome CDP Driver & Gemini Web Image Engine
-// Supports: Text-to-Image (T2I), Image-to-Image (I2I), Single-Session Persistence,
-//           Dual-Gated Attachment Assertion, and Canvas Lossless Extraction.
+// gemini_bridge.js - Universal Cross-Platform Chrome CDP Driver & Gemini Engine
+// Supports: Windows, macOS, Linux | Text-to-Image (T2I) & Image-to-Image (I2I)
+//           Real Gate 1 & Gate 2 DOM Assertions | Canvas Lossless Extraction
 // ============================================================================
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const http = require('http');
 const { spawn } = require('child_process');
+const selectors = require('./selectors.js');
 
 let puppeteer;
 try { puppeteer = require('puppeteer-core'); } catch {}
@@ -23,21 +24,76 @@ if (!puppeteer) {
 }
 
 const CONFIG = {
-  DEBUG_PORT: 9222,
-  GEMINI_BASE_URL: 'https://gemini.google.com/app',
-  USER_DATA_DIR: 'C:\\Users\\15695\\.chrome-gemini-bridge',
-  CHROME_PATH: 'C:\\Users\\15695\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe',
+  DEBUG_HOST: process.env.GEMINI_DEBUG_HOST || '127.0.0.1',
+  DEBUG_PORT: parseInt(process.env.GEMINI_DEBUG_PORT, 10) || 9222,
+  GEMINI_BASE_URL: process.env.GEMINI_BASE_URL || 'https://gemini.google.com/app',
+  USER_DATA_DIR: process.env.GEMINI_USER_DATA_DIR || path.join(os.homedir(), '.chrome-gemini-bridge'),
   DEFAULT_TIMEOUT_MS: 90000,
 };
 
 let activeBrowser = null;
 let activePage = null;
+let executionQueue = Promise.resolve();
 
+/**
+ * Locate Chrome executable across Windows, macOS, and Linux
+ */
+function findChromeExecutable() {
+  if (process.env.CHROME_PATH && fs.existsSync(process.env.CHROME_PATH)) {
+    return process.env.CHROME_PATH;
+  }
+
+  const platform = process.platform;
+  const candidates = [];
+
+  if (platform === 'win32') {
+    const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+    const progFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
+    const progFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+
+    candidates.push(
+      path.join(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      path.join(progFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      path.join(progFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe')
+    );
+  } else if (platform === 'darwin') {
+    candidates.push(
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      path.join(os.homedir(), 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
+    );
+  } else {
+    // Linux / Unix
+    candidates.push(
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/chromium',
+      '/usr/bin/chromium-browser',
+      '/snap/bin/chromium'
+    );
+  }
+
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+
+  throw new Error(
+    `[GeminiBridge] Chrome executable not found for platform: ${platform}. ` +
+    `Please set the CHROME_PATH environment variable or install Google Chrome.`
+  );
+}
+
+/**
+ * Check if debugging port is responsive
+ */
 function checkPort() {
   return new Promise((resolve) => {
-    const req = http.get('http://127.0.0.1:' + CONFIG.DEBUG_PORT + '/json/version', (res) => {
-      resolve(res.statusCode === 200);
-    });
+    const req = http.get(
+      `http://${CONFIG.DEBUG_HOST}:${CONFIG.DEBUG_PORT}/json/version`,
+      (res) => {
+        resolve(res.statusCode === 200);
+      }
+    );
     req.on('error', () => resolve(false));
     req.setTimeout(1500, () => {
       req.destroy();
@@ -46,14 +102,27 @@ function checkPort() {
   });
 }
 
+/**
+ * Ensure Chrome is running with remote debugging port
+ */
 async function ensureChrome(targetUrl) {
   if (await checkPort()) return;
-  console.log('[GeminiBridge] 🚀 Launching Chrome with debugging port 9222...');
+
+  const chromePath = findChromeExecutable();
+  console.log(`[GeminiBridge] 🚀 Launching Chrome (${chromePath}) on port ${CONFIG.DEBUG_PORT}...`);
+  console.log(`[GeminiBridge] 📁 Profile Directory: ${CONFIG.USER_DATA_DIR}`);
+
+  if (!fs.existsSync(CONFIG.USER_DATA_DIR)) {
+    fs.mkdirSync(CONFIG.USER_DATA_DIR, { recursive: true });
+  }
+
   const child = spawn(
-    CONFIG.CHROME_PATH,
+    chromePath,
     [
-      '--remote-debugging-port=' + CONFIG.DEBUG_PORT,
-      '--user-data-dir=' + CONFIG.USER_DATA_DIR,
+      `--remote-debugging-port=${CONFIG.DEBUG_PORT}`,
+      `--user-data-dir=${CONFIG.USER_DATA_DIR}`,
+      '--no-first-run',
+      '--no-default-browser-check',
       targetUrl || CONFIG.GEMINI_BASE_URL,
     ],
     { detached: true, stdio: 'ignore' }
@@ -63,27 +132,38 @@ async function ensureChrome(targetUrl) {
   for (let i = 0; i < 15; i++) {
     await new Promise((r) => setTimeout(r, 1000));
     if (await checkPort()) {
-      console.log('[GeminiBridge] ✓ Connected to Chrome on port 9222');
+      console.log('[GeminiBridge] ✓ Connected to Chrome on port', CONFIG.DEBUG_PORT);
       return;
     }
   }
-  throw new Error('Failed to launch Chrome with remote debugging on port 9222');
+
+  throw new Error(`Failed to connect to Chrome on port ${CONFIG.DEBUG_PORT} within 15 seconds.`);
 }
 
+/**
+ * Get or connect to Puppeteer browser instance
+ */
 async function getBrowser(targetUrl) {
   await ensureChrome(targetUrl);
   if (activeBrowser && activeBrowser.isConnected()) {
     return activeBrowser;
   }
 
+  if (!puppeteer) {
+    throw new Error('puppeteer-core or puppeteer is required. Run "npm install puppeteer-core".');
+  }
+
   activeBrowser = await puppeteer.connect({
-    browserURL: 'http://127.0.0.1:' + CONFIG.DEBUG_PORT,
+    browserURL: `http://${CONFIG.DEBUG_HOST}:${CONFIG.DEBUG_PORT}`,
     defaultViewport: { width: 1440, height: 900 },
   });
 
   return activeBrowser;
 }
 
+/**
+ * Get or navigate to Gemini Web page
+ */
 async function getGeminiPage(targetUrl) {
   const browser = await getBrowser(targetUrl);
   const pages = await browser.pages();
@@ -93,10 +173,10 @@ async function getGeminiPage(targetUrl) {
 
   if (!page) {
     page = pages[0] || (await browser.newPage());
-    console.log('[GeminiBridge] 🌐 Navigating to ' + destUrl + '...');
+    console.log(`[GeminiBridge] 🌐 Navigating to ${destUrl}...`);
     await page.goto(destUrl, { waitUntil: 'networkidle2', timeout: 45000 });
   } else if (targetUrl && !page.url().includes(targetUrl.split('/').pop())) {
-    console.log('[GeminiBridge] 🌐 Switching to conversation: ' + targetUrl + '...');
+    console.log(`[GeminiBridge] 🌐 Switching conversation to: ${targetUrl}...`);
     await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 45000 });
   }
 
@@ -106,150 +186,198 @@ async function getGeminiPage(targetUrl) {
 }
 
 /**
- * Universal Image Generation Engine (Supports Text-to-Image & Image-to-Image with Dual-Gated Verification)
+ * Internal single execution core
  */
-async function generateImage(prompt, options = {}) {
+async function executeGeneration(prompt, options = {}) {
   const startTime = Date.now();
-  const timeoutMs = options.timeoutMs || CONFIG.DEFAULT_TIMEOUT_MS;
-  const rawPrompt = (prompt || '').trim();
-  const refImage = options.referenceImagePath ? path.resolve(options.referenceImagePath) : null;
-  const targetUrl = options.targetUrl || null;
-
+  const rawPrompt = typeof prompt === 'string' ? prompt.trim() : '';
   if (!rawPrompt) {
-    throw new Error('Prompt cannot be empty');
+    throw new Error('[GeminiBridge] Prompt must be a non-empty string.');
   }
 
+  let timeoutMs = CONFIG.DEFAULT_TIMEOUT_MS;
+  if (options.timeoutMs !== undefined) {
+    const parsed = parseInt(options.timeoutMs, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new Error(`[GeminiBridge] Invalid timeoutMs: ${options.timeoutMs}. Must be a positive integer.`);
+    }
+    timeoutMs = parsed;
+  }
+
+  // Strict reference image existence check (No silent fallback!)
+  let refImage = null;
+  if (options.referenceImagePath) {
+    const resolvedPath = path.resolve(options.referenceImagePath);
+    if (!fs.existsSync(resolvedPath)) {
+      throw new Error(`[GeminiBridge] ❌ Reference image not found on disk: "${resolvedPath}". Aborting!`);
+    }
+    refImage = resolvedPath;
+  }
+
+  const targetUrl = options.targetUrl || null;
   const page = await getGeminiPage(targetUrl);
   await page.setViewport({ width: 1440, height: 900 });
-  await new Promise((r) => setTimeout(r, 1000));
 
-  // 1. Clean UI state
-  console.log('[GeminiBridge] 1. Preparing UI & input area...');
-  await page.evaluate(() => {
-    const closeBtn = document.querySelector('button[aria-label*="关闭"], button[aria-label*="Close"], button[aria-label*="收起"]');
-    if (closeBtn) closeBtn.click();
-    const stopBtn = document.querySelector('button[aria-label*="停止"], button[aria-label*="Stop"]');
-    if (stopBtn) stopBtn.click();
-  });
-  await new Promise((r) => setTimeout(r, 600));
+  // 1. Clean UI state (dismiss popups, stop lingering generations)
+  await page.evaluate((btnSel) => {
+    const allButtons = Array.from(document.querySelectorAll('button'));
+    // Stop button
+    const stop = allButtons.find((b) => {
+      const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+      return btnSel.stopAriaMatches.some((m) => aria.includes(m));
+    });
+    if (stop) stop.click();
+
+    // Close button
+    const close = allButtons.find((b) => {
+      const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+      return btnSel.closeAriaMatches.some((m) => aria.includes(m));
+    });
+    if (close) close.click();
+  }, selectors.buttons);
 
   // 2. Clear input area
-  const inputEl = await page.$('div.ql-editor, textarea, [contenteditable="true"]');
-  if (inputEl) {
-    await inputEl.click();
-    await page.keyboard.down('Control');
-    await page.keyboard.press('KeyA');
-    await page.keyboard.up('Control');
-    await page.keyboard.press('Backspace');
-    await new Promise((r) => setTimeout(r, 300));
-  }
+  await page.waitForSelector(selectors.input.editor, { timeout: 10000 });
+  await page.evaluate((editorSel) => {
+    const el = document.querySelector(editorSel);
+    if (el) {
+      el.focus();
+      if (el.isContentEditable) {
+        el.innerText = '';
+      } else if ('value' in el) {
+        el.value = '';
+      }
+    }
+  }, selectors.input.editor);
 
-  // 3. Upload Reference Image if provided (Img2Img Flow)
-  if (refImage && fs.existsSync(refImage)) {
-    console.log('[GeminiBridge] 📎 Attaching reference image: ' + refImage + '...');
+  // 3. Upload Reference Image if provided (Image-to-Image)
+  if (refImage) {
+    console.log(`[GeminiBridge] 📎 Attaching reference image: ${refImage}...`);
 
-    // Click "+" button inside input container
-    await page.evaluate(() => {
+    // Click "+" button
+    const uploadBtnClicked = await page.evaluate((upSel) => {
       const btns = Array.from(document.querySelectorAll('button'));
       const upload = btns.find((b) => {
-        const aria = b.getAttribute('aria-label') || '';
-        return aria.includes('上传') || aria.includes('Upload');
+        const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+        return upSel.buttonAriaMatches.some((m) => aria.includes(m));
       });
-      if (upload) upload.click();
-    });
-    await new Promise((r) => setTimeout(r, 800));
+      if (upload) {
+        upload.click();
+        return true;
+      }
+      return false;
+    }, selectors.upload);
 
-    // Catch FileChooser on clicking "上传文件"
+    if (!uploadBtnClicked) {
+      throw new Error('[GeminiBridge] Upload "+" button could not be located in the UI.');
+    }
+
+    // Trigger FileChooser on popup menu item
     const [fileChooser] = await Promise.all([
       page.waitForFileChooser({ timeout: 8000 }),
-      page.evaluate(() => {
-        const items = Array.from(document.querySelectorAll('button, div[role="menuitem"], .mat-mdc-menu-item, span'));
+      page.evaluate((upSel) => {
+        const items = Array.from(document.querySelectorAll(upSel.menuItems));
         const target = items.find((el) => {
-          const t = (el.innerText || '').trim();
-          return t === '上传文件' || t === '上传图片' || t === 'Upload files' || t.includes('上传文件') || t.includes('上传图片');
+          const t = (el.innerText || '').trim().toLowerCase();
+          return upSel.menuItemTexts.some((m) => t.includes(m));
         });
         if (target) {
           target.click();
           return true;
         }
         return false;
-      }),
+      }, selectors.upload),
     ]);
 
     if (!fileChooser) {
-      throw new Error('❌ [GATE 1 FAILED] FileChooser could not be triggered from upload menu!');
+      throw new Error('❌ [GATE 1 FAILED] FileChooser could not be triggered from the upload menu!');
     }
 
-    console.log('[GeminiBridge] ✓ FileChooser caught! Passing reference image file...');
     await fileChooser.accept([refImage]);
 
     // GATE 1 - Hard Assertion: Wait for image thumbnail chip in input box
-    console.log('[GeminiBridge] ⏳ [GATE 1 Check] Verifying attachment thumbnail in input box...');
-    let attached = false;
-    for (let i = 0; i < 20; i++) {
-      await new Promise((r) => setTimeout(r, 500));
-      attached = await page.evaluate(() => {
-        const previews = Array.from(
-          document.querySelectorAll(
-            '.input-area img, .chat-input-container img, rich-textarea img, .attachment-preview, .uploaded-image, [data-test-id*="attachment"]'
-          )
-        );
-        return previews.length > 0;
-      });
-      if (attached) break;
-    }
+    console.log('[GeminiBridge] ⏳ [GATE 1] Verifying image thumbnail chip in input box...');
+    const gate1Passed = await page.waitForFunction(
+      (chipsSel) => {
+        const previews = Array.from(document.querySelectorAll(chipsSel.join(', ')));
+        return previews.some((img) => img.naturalWidth > 0 || img.complete || img.clientHeight > 0);
+      },
+      { timeout: 12000 },
+      selectors.attachment.chips
+    ).catch(() => false);
 
     if (options.gate1ProofPath) {
-      await page.screenshot({ path: options.gate1ProofPath });
-      console.log('[GeminiBridge] 📸 Saved Gate 1 Proof: ' + options.gate1ProofPath);
+      const p = path.resolve(options.gate1ProofPath);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      await page.screenshot({ path: p });
+      console.log(`[GeminiBridge] 📸 Saved Gate 1 Proof: ${p}`);
     }
 
-    if (!attached) {
-      throw new Error('❌ [GATE 1 FAILED] Image thumbnail chip was NOT detected in input bar after upload. Aborting send!');
+    if (!gate1Passed) {
+      throw new Error('❌ [GATE 1 FAILED] Image thumbnail chip was NOT detected in input box after upload. Aborting!');
     }
-    console.log('[GeminiBridge] 🎉 [GATE 1 PASSED] Keyframe reference image attached inside input bar!');
+    console.log('[GeminiBridge] 🎉 [GATE 1 PASSED] Reference image successfully attached in input bar!');
   }
 
-  // 4. Type Prompt
-  console.log('[GeminiBridge] ⌨️ Submitting prompt: "' + rawPrompt.slice(0, 70) + '..."');
-  const activeInput = await page.$('div.ql-editor, textarea, [contenteditable="true"]');
-  if (activeInput) {
-    await activeInput.click();
-    await page.keyboard.type(rawPrompt, { delay: 4 });
-    await new Promise((r) => setTimeout(r, 500));
-  }
+  // 4. Fast Text Insertion
+  console.log(`[GeminiBridge] ⌨️ Submitting prompt: "${rawPrompt.slice(0, 75)}..."`);
+  await page.evaluate((editorSel, text) => {
+    const el = document.querySelector(editorSel);
+    if (el) {
+      el.focus();
+      document.execCommand('insertText', false, text);
+    }
+  }, selectors.input.editor, rawPrompt);
 
-  // 5. Submit Message
-  const sendClicked = await page.evaluate(() => {
+  // 5. Submit Message (Send Button / Enter)
+  const sendClicked = await page.evaluate((btnSel) => {
     const btns = Array.from(document.querySelectorAll('button'));
     const send = btns.find((b) => {
-      const aria = b.getAttribute('aria-label') || '';
-      return aria.includes('发送') || aria.includes('Send');
+      const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+      return btnSel.sendAriaMatches.some((m) => aria.includes(m));
     });
-    if (send) {
+    if (send && !send.disabled) {
       send.click();
       return true;
     }
     return false;
-  });
+  }, selectors.buttons);
 
   if (!sendClicked) {
     await page.keyboard.press('Enter');
   }
-  console.log('[GeminiBridge] ✓ Sent message!');
+  console.log('[GeminiBridge] ✓ Message dispatched!');
 
-  // 6. GATE 2 - Hard Assertion
+  // 6. GATE 2 - Real DOM Assertion: Wait for user query bubble to contain the image thumbnail
   if (refImage) {
-    console.log('[GeminiBridge] ⏳ [GATE 2 Check] Verifying user message bubble contains attachment...');
-    await new Promise((r) => setTimeout(r, 3500));
+    console.log('[GeminiBridge] ⏳ [GATE 2] Asserting user query bubble in DOM contains attached image...');
+    const gate2Passed = await page.waitForFunction(
+      (chatSel) => {
+        const bubbles = Array.from(document.querySelectorAll(chatSel.userQueryBubbles.join(', ')));
+        if (bubbles.length === 0) return false;
+        const latest = bubbles[bubbles.length - 1];
+        const imgs = Array.from(latest.querySelectorAll(chatSel.userQueryImages));
+        return imgs.some((img) => img.naturalWidth > 0 || img.complete);
+      },
+      { timeout: 10000 },
+      selectors.chat
+    ).catch(() => false);
+
     if (options.gate2ProofPath) {
-      await page.screenshot({ path: options.gate2ProofPath });
-      console.log('[GeminiBridge] 📸 Saved Gate 2 Proof: ' + options.gate2ProofPath);
+      const p = path.resolve(options.gate2ProofPath);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      await page.screenshot({ path: p });
+      console.log(`[GeminiBridge] 📸 Saved Gate 2 Proof: ${p}`);
     }
-    console.log('[GeminiBridge] 🎉 [GATE 2 Checked] Message successfully transmitted with attachment!');
+
+    if (!gate2Passed) {
+      console.warn('[GeminiBridge] ⚠️ [GATE 2 Warning] User message bubble did not register image element within timeout.');
+    } else {
+      console.log('[GeminiBridge] 🎉 [GATE 2 PASSED] User message bubble confirmed with image attachment in DOM!');
+    }
   }
 
-  // 7. Poll for Newly Rendered Image
+  // 7. Poll for Newly Rendered Imagen 3 Image in DOM
   console.log('[GeminiBridge] ⏳ Waiting for Gemini Imagen 3 rendering in conversation...');
   const deadline = Date.now() + timeoutMs;
   let resultDataUrl = null;
@@ -257,11 +385,13 @@ async function generateImage(prompt, options = {}) {
   let imgHeight = 0;
 
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 1500));
 
-    const check = await page.evaluate(() => {
-      const allImgs = Array.from(document.querySelectorAll('generated-image img, single-image img, .image-container img, img.image'));
-      const candidates = allImgs.filter((img) => img.naturalWidth > 250 && img.naturalHeight > 250);
+    const check = await page.evaluate((outSel) => {
+      const allImgs = Array.from(document.querySelectorAll(outSel.generatedImages.join(', ')));
+      const candidates = allImgs.filter(
+        (img) => img.naturalWidth >= outSel.minWidth && img.naturalHeight >= outSel.minHeight && img.complete
+      );
       if (candidates.length === 0) return null;
 
       const target = candidates[candidates.length - 1];
@@ -280,7 +410,7 @@ async function generateImage(prompt, options = {}) {
         }
       } catch {}
       return null;
-    });
+    }, selectors.output);
 
     if (check && check.dataUrl) {
       resultDataUrl = check.dataUrl;
@@ -292,7 +422,7 @@ async function generateImage(prompt, options = {}) {
 
   if (!resultDataUrl) {
     const elapsed = Math.round((Date.now() - startTime) / 1000);
-    throw new Error('Timed out waiting for image generation after ' + elapsed + 's.');
+    throw new Error(`[GeminiBridge] Timed out waiting for image generation after ${elapsed}s.`);
   }
 
   const base64Data = resultDataUrl.replace(/^data:image\/\w+;base64,/, '');
@@ -300,10 +430,9 @@ async function generateImage(prompt, options = {}) {
 
   if (options.outputPath) {
     const finalOut = path.resolve(options.outputPath);
-    const parentDir = path.dirname(finalOut);
-    if (!fs.existsSync(parentDir)) fs.mkdirSync(parentDir, { recursive: true });
+    fs.mkdirSync(path.dirname(finalOut), { recursive: true });
     fs.writeFileSync(finalOut, buffer);
-    console.log('[GeminiBridge] 🎉 [Imagen 3] Successfully saved image (' + imgWidth + 'x' + imgHeight + ') to: ' + finalOut);
+    console.log(`[GeminiBridge] 🎉 Successfully saved image (${imgWidth}x${imgHeight}) to: ${finalOut}`);
   }
 
   return {
@@ -313,15 +442,40 @@ async function generateImage(prompt, options = {}) {
     dataUrl: resultDataUrl,
     width: imgWidth,
     height: imgHeight,
-    outputPath: options.outputPath || null,
+    outputPath: options.outputPath ? path.resolve(options.outputPath) : null,
     durationMs: Date.now() - startTime,
   };
 }
 
+/**
+ * Concurrency-Safe Public API (Mutex Serialized)
+ */
+function generateImage(prompt, options = {}) {
+  const task = executionQueue.then(() => executeGeneration(prompt, options));
+  executionQueue = task.catch(() => {});
+  return task;
+}
+
+/**
+ * Close and disconnect browser instance
+ */
+async function closeBrowser() {
+  if (activeBrowser) {
+    try {
+      activeBrowser.disconnect();
+    } catch {}
+    activeBrowser = null;
+    activePage = null;
+  }
+}
+
 module.exports = {
+  findChromeExecutable,
   checkPort,
   ensureChrome,
   getBrowser,
   getGeminiPage,
   generateImage,
+  closeBrowser,
+  CONFIG,
 };

@@ -1,18 +1,20 @@
 {
   "name": "gemini-web-image-gen",
-  "version": "2.0.0",
-  "description": "Standalone automated image generation (T2I & I2I) via Google Gemini Web (Imagen 3) using Chrome DevTools Protocol (CDP).",
+  "version": "2.1.0",
+  "description": "Cross-platform automated AI image generation bridge (Text-to-Image & Image-to-Image) via Google Gemini Web (Imagen 3) using Chrome DevTools Protocol.",
   "main": "scripts/gemini_bridge.js",
   "bin": {
     "gemini-gen": "scripts/generate_single.js"
   },
-  "dependencies": {
-    "puppeteer-core": "^24.0.0",
-    "minimist": "^1.2.8"
-  },
   "scripts": {
+    "test": "node tests/test_bridge.js",
     "generate": "node scripts/generate_single.js",
-    "batch": "node scripts/batch_generator.js"
+    "batch": "node scripts/batch_generator.js",
+    "launch": "node scripts/launch_chrome.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/spurbro/gemini-web-image-gen.git"
   },
   "keywords": [
     "gemini",
@@ -21,8 +23,28 @@
     "cdp",
     "puppeteer",
     "img2img",
-    "agent-skill"
+    "text-to-image",
+    "agent-skill",
+    "ai-bridge"
   ],
-  "author": "Antigravity",
-  "license": "MIT"
+  "author": "spurbro",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/spurbro/gemini-web-image-gen/issues"
+  },
+  "homepage": "https://github.com/spurbro/gemini-web-image-gen#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "scripts/",
+    "references/",
+    "SKILL.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "minimist": "^1.2.8",
+    "puppeteer-core": "^24.0.0"
+  }
 }

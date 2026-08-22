@@ -4,47 +4,35 @@
 // Usage: node batch_generator.js --config tasks.json --output-dir ./output
 // ============================================================================
 
-import fs from 'fs/promises';
-import path from 'path';
-import { generateImage } from './gemini_bridge.js';
+const fs = require('fs');
+const path = require('path');
+const minimist = require('minimist');
+const { generateImage } = require('./gemini_bridge.js');
 
-function parseArgs() {
-  const args = process.argv.slice(2);
-  let configFile = '';
-  let outputDir = './output';
-  let delayMs = 3000;
-  let maxRetries = 2;
+const args = minimist(process.argv.slice(2), {
+  string: ['config', 'output-dir', 'delay', 'retries'],
+  alias: { c: 'config', o: 'output-dir', d: 'delay', r: 'retries' },
+});
 
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === '--config' || arg === '-c') {
-      configFile = args[++i];
-    } else if (arg === '--output-dir' || arg === '-o') {
-      outputDir = args[++i];
-    } else if (arg === '--delay' || arg === '-d') {
-      delayMs = parseInt(args[++i], 10) || 3000;
-    } else if (arg === '--retries' || arg === '-r') {
-      maxRetries = parseInt(args[++i], 10) || 2;
-    }
-  }
+const configFile = args.config ? path.resolve(args.config) : '';
+const outputDir = path.resolve(args['output-dir'] || './output');
+const delayMs = parseInt(args.delay, 10) || 3000;
+const maxRetries = parseInt(args.retries, 10) || 2;
 
-  if (!configFile) {
-    console.error('❌ Error: --config <tasks.json> is required.');
-    console.log('Usage: node batch_generator.js --config tasks.json --output-dir "public/assets"');
-    process.exit(1);
-  }
-
-  return {
-    configFile: path.resolve(configFile),
-    outputDir: path.resolve(outputDir),
-    delayMs,
-    maxRetries,
-  };
+if (!configFile) {
+  console.error('❌ Error: --config <tasks.json> is required.');
+  console.log('Usage: node batch_generator.js --config tasks.json --output-dir "output"');
+  process.exit(1);
 }
 
-async function fileExistsAndNotEmpty(filePath) {
+if (!fs.existsSync(configFile)) {
+  console.error(`❌ Error: Config file does not exist: "${configFile}"`);
+  process.exit(1);
+}
+
+function fileExistsAndNotEmpty(filePath) {
   try {
-    const stat = await fs.stat(filePath);
+    const stat = fs.statSync(filePath);
     return stat.size > 1000;
   } catch {
     return false;
@@ -52,24 +40,31 @@ async function fileExistsAndNotEmpty(filePath) {
 }
 
 async function main() {
-  const { configFile, outputDir, delayMs, maxRetries } = parseArgs();
-
-  const rawConfig = await fs.readFile(configFile, 'utf8');
-  const tasks = JSON.parse(rawConfig);
-
-  if (!Array.isArray(tasks) || tasks.length === 0) {
-    console.error('❌ Config file must contain an array of tasks: [{ filename, prompt }]');
+  const rawConfig = fs.readFileSync(configFile, 'utf8');
+  let tasks;
+  try {
+    tasks = JSON.parse(rawConfig);
+  } catch (e) {
+    console.error(`❌ Error parsing JSON config file: ${e.message}`);
     process.exit(1);
   }
 
-  await fs.mkdir(outputDir, { recursive: true });
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    console.error('❌ Config file must contain an array of tasks: [{ filename, prompt, referenceImage?, targetUrl? }]');
+    process.exit(1);
+  }
+
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
+  }
 
   console.log('========================================================');
   console.log(`🚀 [Batch Image Gen] Starting ${tasks.length} tasks`);
   console.log(`📁 Output Directory: ${outputDir}`);
   console.log('========================================================');
 
-  const results = [];
+  // Map to store latest status per filename (deduplicated)
+  const resultMap = new Map();
 
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     const pendingTasks = [];
@@ -79,11 +74,10 @@ async function main() {
       const targetFilename = task.filename || `task_${i + 1}.png`;
       const targetPath = path.join(outputDir, targetFilename);
 
-      const exists = await fileExistsAndNotEmpty(targetPath);
-      if (exists) {
+      if (fileExistsAndNotEmpty(targetPath)) {
         if (attempt === 1) {
-          console.log(`[Batch] ⏭️ Skipping [${i + 1}/${tasks.length}] ${targetFilename} - Already exists`);
-          results.push({ filename: targetFilename, success: true, cached: true });
+          console.log(`[Batch] ⏭️ Skipping [${i + 1}/${tasks.length}] ${targetFilename} - Already exists on disk`);
+          resultMap.set(targetFilename, { filename: targetFilename, success: true, cached: true });
         }
       } else {
         pendingTasks.push({ index: i, task, targetPath, targetFilename });
@@ -97,22 +91,31 @@ async function main() {
 
     if (attempt > 1) {
       console.log(`\n🔁 [Batch] Starting Retry Round ${attempt - 1} for ${pendingTasks.length} pending items...`);
-      await new Promise((r) => setTimeout(r, 4000));
+      await new Promise((r) => setTimeout(r, 3000));
     }
 
     for (let p = 0; p < pendingTasks.length; p++) {
       const { index, task, targetPath, targetFilename } = pendingTasks[p];
-      console.log(`\n========================================================`);
+      const refPath = task.referenceImage || task.referenceImagePath || task.ref || null;
+      const targetUrl = task.targetUrl || task.url || null;
+
+      console.log('\n========================================================');
       console.log(`🎨 [Batch] [${index + 1}/${tasks.length}] Generating: ${targetFilename}`);
       console.log(`📝 Prompt: ${task.prompt}`);
-      console.log(`========================================================`);
+      if (refPath) console.log(`📎 Reference Image: ${refPath}`);
+      if (targetUrl) console.log(`🌐 Session URL: ${targetUrl}`);
+      console.log('========================================================');
 
       try {
-        const genRes = await generateImage(task.prompt, { timeoutMs: task.timeout || 95000 });
-        await fs.writeFile(targetPath, genRes.buffer);
-        console.log(`✅ [Batch] Saved to: ${targetPath} (${Math.round(genRes.durationMs / 1000)}s)`);
+        const genRes = await generateImage(task.prompt, {
+          referenceImagePath: refPath ? path.resolve(path.dirname(configFile), refPath) : null,
+          targetUrl: targetUrl,
+          outputPath: targetPath,
+          timeoutMs: task.timeout || 95000,
+        });
 
-        results.push({
+        console.log(`✅ [Batch] Saved to: ${targetPath} (${Math.round(genRes.durationMs / 1000)}s)`);
+        resultMap.set(targetFilename, {
           filename: targetFilename,
           success: true,
           path: targetPath,
@@ -120,7 +123,7 @@ async function main() {
         });
       } catch (err) {
         console.error(`❌ [Batch] Failed: ${err.message}`);
-        results.push({
+        resultMap.set(targetFilename, {
           filename: targetFilename,
           success: false,
           error: err.message,
@@ -134,10 +137,20 @@ async function main() {
     }
   }
 
+  const finalResults = Array.from(resultMap.values());
+  const failedCount = finalResults.filter((r) => !r.success).length;
+
   console.log('\n========================================================');
-  console.log('📊 Batch Generation Summary:');
-  console.log(JSON.stringify(results, null, 2));
+  console.log(`📊 Batch Generation Summary (${finalResults.length - failedCount}/${finalResults.length} Succeeded):`);
+  console.log(JSON.stringify(finalResults, null, 2));
   console.log('========================================================');
+
+  if (failedCount > 0) {
+    process.exitCode = 1;
+  }
 }
 
-main().catch(console.error);
+main().catch((err) => {
+  console.error('Fatal batch error:', err);
+  process.exit(1);
+});
