@@ -6,13 +6,59 @@
 
 const fs = require('fs');
 const path = require('path');
-const minimist = require('minimist');
-const { generateImage } = require('./gemini_bridge.js');
+let minimist;
+try { minimist = require('minimist'); } catch {}
+if (!minimist) {
+  try { minimist = require(path.join(__dirname, '../node_modules/minimist')); } catch {}
+}
+if (!minimist) {
+  minimist = function(args, opts = {}) {
+    const res = { _: [] };
+    const aliases = opts.alias || {};
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+      if (arg.startsWith('--')) {
+        const key = arg.slice(2);
+        const next = args[i + 1];
+        if (next !== undefined && !next.startsWith('-')) {
+          res[key] = next;
+          i++;
+        } else {
+          res[key] = true;
+        }
+      } else if (arg.startsWith('-') && arg.length > 1) {
+        const shortKey = arg.slice(1);
+        const fullKey = Object.keys(aliases).find(k => aliases[k] === shortKey) || shortKey;
+        const next = args[i + 1];
+        if (next !== undefined && !next.startsWith('-')) {
+          res[fullKey] = next;
+          res[shortKey] = next;
+          i++;
+        } else {
+          res[fullKey] = true;
+          res[shortKey] = true;
+        }
+      } else {
+        res._.push(arg);
+      }
+    }
+    for (const [mainKey, aliasKey] of Object.entries(aliases)) {
+      if (res[aliasKey] !== undefined && res[mainKey] === undefined) {
+        res[mainKey] = res[aliasKey];
+      } else if (res[mainKey] !== undefined && res[aliasKey] === undefined) {
+        res[aliasKey] = res[mainKey];
+      }
+    }
+    return res;
+  };
+}
 
 const args = minimist(process.argv.slice(2), {
   string: ['config', 'output-dir', 'delay', 'retries'],
   alias: { c: 'config', o: 'output-dir', d: 'delay', r: 'retries' },
 });
+
+const { generateImage } = require('./gemini_bridge.js');
 
 const configFile = args.config ? path.resolve(args.config) : '';
 const outputDir = path.resolve(args['output-dir'] || './output');
@@ -94,10 +140,11 @@ async function main() {
       await new Promise((r) => setTimeout(r, 3000));
     }
 
+    let lastSessionUrl = null;
     for (let p = 0; p < pendingTasks.length; p++) {
       const { index, task, targetPath, targetFilename } = pendingTasks[p];
       const refPath = task.referenceImage || task.referenceImagePath || task.ref || null;
-      const targetUrl = task.targetUrl || task.url || null;
+      const targetUrl = task.targetUrl || task.url || (task.chain ? lastSessionUrl : null);
 
       console.log('\n========================================================');
       console.log(`🎨 [Batch] [${index + 1}/${tasks.length}] Generating: ${targetFilename}`);
@@ -114,11 +161,14 @@ async function main() {
           timeoutMs: task.timeout || 95000,
         });
 
+        lastSessionUrl = genRes.conversationUrl;
         console.log(`✅ [Batch] Saved to: ${targetPath} (${Math.round(genRes.durationMs / 1000)}s)`);
+        console.log(`🔗 Session URL: ${genRes.conversationUrl}`);
         resultMap.set(targetFilename, {
           filename: targetFilename,
           success: true,
           path: targetPath,
+          conversationUrl: genRes.conversationUrl,
           durationMs: genRes.durationMs,
         });
       } catch (err) {

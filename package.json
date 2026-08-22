@@ -1,10 +1,11 @@
 {
-  "name": "gemini-web-image-gen",
-  "version": "2.1.0",
-  "description": "Cross-platform automated AI image generation bridge (Text-to-Image & Image-to-Image) via Google Gemini Web (Imagen 3) using Chrome DevTools Protocol.",
+  "name": "gemini-imagen-cdp-bridge",
+  "version": "2.2.0",
+  "description": "Production-grade automated AI image generation bridge (Text-to-Image & Image-to-Image) for Google Gemini Web (Imagen 3) via Chrome DevTools Protocol (CDP).",
   "main": "scripts/gemini_bridge.js",
   "bin": {
-    "gemini-gen": "scripts/generate_single.js"
+    "gemini-gen": "scripts/generate_single.js",
+    "imagen-bridge": "scripts/generate_single.js"
   },
   "scripts": {
     "test": "node tests/test_bridge.js",
@@ -14,7 +15,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/spurbro/gemini-web-image-gen.git"
+    "url": "git+https://github.com/spurbro/gemini-imagen-cdp-bridge.git"
   },
   "keywords": [
     "gemini",
@@ -25,7 +26,9 @@
     "img2img",
     "text-to-image",
     "agent-skill",
-    "ai-bridge"
+    "ai-bridge",
+    "chrome-devtools-protocol",
+    "gemini-bridge"
   ],
   "author": "spurbro",
   "license": "MIT",
