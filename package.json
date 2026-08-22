@@ -1,0 +1,28 @@
+{
+  "name": "gemini-web-image-gen",
+  "version": "2.0.0",
+  "description": "Standalone automated image generation (T2I & I2I) via Google Gemini Web (Imagen 3) using Chrome DevTools Protocol (CDP).",
+  "main": "scripts/gemini_bridge.js",
+  "bin": {
+    "gemini-gen": "scripts/generate_single.js"
+  },
+  "dependencies": {
+    "puppeteer-core": "^24.0.0",
+    "minimist": "^1.2.8"
+  },
+  "scripts": {
+    "generate": "node scripts/generate_single.js",
+    "batch": "node scripts/batch_generator.js"
+  },
+  "keywords": [
+    "gemini",
+    "imagen-3",
+    "image-generation",
+    "cdp",
+    "puppeteer",
+    "img2img",
+    "agent-skill"
+  ],
+  "author": "Antigravity",
+  "license": "MIT"
+}
