@@ -1,47 +1,44 @@
-# Gemini Web Standalone Image Generation Engine (v2.0.0)
+# Gemini Web Browser Image Generation Bridge (v2.0.0)
 
 [![GitHub License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-brightgreen.svg)]()
-[![Gemini](https://img.shields.io/badge/powered%20by-Google%20Gemini%20Web%20(Imagen%203)-orange.svg)]()
+[![Gemini](https://img.shields.io/badge/channel-Google%20Gemini%20Web%20(Imagen%203)-orange.svg)]()
 
-A 100% standalone, portable, zero-cost AI image generation skill powered by Google Gemini Web (Imagen 3) and Chrome DevTools Protocol (CDP). Designed for direct invocation by any AI agent, test harness, or CLI workflow.
+A standalone, pure browser automation bridge and execution channel for Google Gemini Web (Imagen 3) powered by Chrome DevTools Protocol (CDP). Designed as a universal, prompt-agnostic image generation channel for AI agents, test harnesses, and CLI tools.
 
 [Read Chinese Documentation (中文文档)](./README_ZH.md)
 
 ---
 
-## 🌟 Key Highlights
+## 🌟 What This Skill Does
 
-- 💰 **Zero API Key & Zero Cost**: Direct interface with Gemini Web Imagen 3 via local session.
-- 🎨 **Text-to-Image & Image-to-Image**: Full multi-modal generation with reference image uploads.
-- 🛡️ **Dual-Gated Quality Assurance**:
-  - **Gate 1 (Pre-Send)**: Asserts the image thumbnail card is mounted in the input area before text entry.
-  - **Gate 2 (Post-Send)**: Verifies the sent query bubble in DOM contains the image.
-- 🧠 **Persistent Single-Session Memory**: Reuse existing conversation URLs to maintain character, lighting, and style consistency.
-- 🖼️ **Lossless Canvas Base64 Extraction**: Bypasses CORS and Blob URL restrictions to save full-resolution PNGs.
-- 📦 **Zero Project Coupling**: No hardcoded paths; dynamically resolves user profiles and works across any project.
+This repository is **strictly an infrastructure bridge/channel** connecting your code to Gemini Web's image generation interface:
+- 🔌 **Pure Pass-Through**: Accepts whatever prompt and reference images you provide without enforcing prompt styles.
+- 🛡️ **Dual-Gated Upload Integrity**: Guarantees reference images are attached inside the input container before sending, preventing silent plain-text fallback.
+- 🧠 **Session Memory Retention**: Direct support for reusing conversation URLs (`--url`) across multi-turn workflows.
+- 🖼️ **Lossless Canvas Extraction**: Extracts full-resolution PNG images directly from in-memory HTML5 Canvas, bypassing CORS and temporary Blob restrictions.
+- 💻 **Zero Hardcoded Paths**: Fully portable across projects and operating systems.
 
 ---
 
-## 📁 Repository Structure
+## 📁 Structure
 
 ```
 gemini-web-image-gen/
-├── SKILL.md                         # Bilingual Master AI Agent Skill Specification
-├── README.md                        # English Documentation & Quickstart
-├── README_ZH.md                     # Chinese Documentation & Quickstart (中文指南)
+├── SKILL.md                         # Bilingual Master AI Agent Bridge Specification
+├── README.md                        # English Bridge Documentation & Quickstart
+├── README_ZH.md                     # Chinese Bridge Documentation (中文指南)
 ├── package.json                     # Standalone Node.js dependencies
 ├── scripts/
-│   ├── gemini_bridge.js             # Core CDP Image Engine (Node.js Module)
-│   ├── generate_single.js           # Single Image CLI Entrypoint
-│   ├── batch_generator.js           # Batch Workflow Generator with queue & resume
-│   └── launch_chrome.ps1            # Remote debugging Chrome launcher (Port 9222)
+│   ├── gemini_bridge.js             # Core CDP Browser Driver & Channel Module
+│   ├── generate_single.js           # CLI Tool for Single Image Generation (T2I & I2I)
+│   ├── batch_generator.js           # Batch Workflow Queue Generator
+│   └── launch_chrome.ps1            # Chrome Debugging Instance Launcher (Port 9222)
 ├── examples/
-│   ├── agent_integration.js         # Programmatic Agent integration sample
+│   ├── agent_integration.js         # How Agents / Test Harnesses call this programmatically
 │   └── tasks_example.json           # Batch task configuration template
 └── references/
-    ├── prompt_guide.md              # Imagen 3 Prompt Engineering & Negative Prompting
-    └── troubleshooting.md           # Error recovery & diagnostic guide
+    └── troubleshooting.md           # CDP connection, port collision & UI self-healing guide
 ```
 
 ---
@@ -55,56 +52,47 @@ cd gemini-web-image-gen
 npm install
 ```
 
-### 2. Launch Chrome with Debugging Port (One-time Setup)
+### 2. Launch Chrome Debugging Session (One-time Setup)
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/launch_chrome.ps1
 ```
-*Log in to your Google Account once in the opened window. Session data is permanently preserved in `~/.chrome-gemini-bridge`.*
+*Sign in to Google once. The profile is permanently stored in `~/.chrome-gemini-bridge`.*
 
-### 3. Generate Single Image (CLI)
+### 3. Generate Image via CLI
 ```bash
-# Text-to-Image (T2I)
-node scripts/generate_single.js -p "A majestic cyberpunk dragon over Tokyo neon skyline, 8k" -o "output/dragon.png"
+# Text-to-Image
+node scripts/generate_single.js -p "Your prompt text here" -o "output/image.png"
 
-# Image-to-Image (I2I in persistent session)
+# Image-to-Image with Persistent Session
 node scripts/generate_single.js \
   -u "https://gemini.google.com/app/<session_id>" \
-  -r "output/dragon.png" \
-  -p "Based on the attached image, generate the dragon breathing blue cosmic flame" \
-  -o "output/dragon_flame.png"
+  -r "path/to/ref.png" \
+  -p "Your continuation prompt here" \
+  -o "output/next.png"
 ```
-
-### 4. CLI Parameters Reference
-
-| Flag | Alias | Description | Required | Default |
-| :--- | :--- | :--- | :--- | :--- |
-| `--prompt` | `-p` | Prompt text describing image | **Yes** | - |
-| `--out` | `-o` | Output image path (PNG) | **Yes** | `output/generated_image.png` |
-| `--ref` | `-r` | Reference image path for Img2Img | No | `null` |
-| `--url` | `-u` | Persistent conversation URL | No | `null` (opens new/active) |
-| `--timeout`| `-t` | Timeout in milliseconds | No | `90000` (90s) |
 
 ---
 
-## 🤖 Programmatic Integration for AI Agents
+## 🤖 Programmatic Integration
 
 ```javascript
 const { generateImage } = require('./scripts/gemini_bridge.js');
 
-async function main() {
-  const res = await generateImage('A cute red panda wearing astronaut suit, 8k', {
-    referenceImagePath: './assets/panda_base.png', // Optional
-    targetUrl: 'https://gemini.google.com/app/your-chat-id', // Optional
-    outputPath: './output/astronaut_panda.png',
+async function run() {
+  const result = await generateImage('Your custom prompt', {
+    referenceImagePath: './assets/ref.png', // Optional: for Img2Img
+    targetUrl: 'https://gemini.google.com/app/your-chat-id', // Optional: keep same session
+    outputPath: './output/result.png',
     timeoutMs: 90000
   });
-  console.log('✓ Image generated at:', res.outputPath);
+
+  console.log('✓ Image saved at:', result.outputPath);
 }
 
-main();
+run();
 ```
 
 ---
 
 ## 📄 License
-MIT License. Free for personal, commercial, and research use.
+MIT License.
