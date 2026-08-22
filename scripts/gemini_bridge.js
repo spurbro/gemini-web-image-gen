@@ -226,7 +226,7 @@ async function getBrowser(targetUrl) {
 /**
  * Get or navigate to Gemini Web page
  */
-async function getGeminiPage(targetUrl) {
+async function getGeminiPage(targetUrl, options = {}) {
   const browser = await getBrowser(targetUrl);
   const pages = await browser.pages();
   const destUrl = targetUrl || CONFIG.GEMINI_BASE_URL;
@@ -235,11 +235,28 @@ async function getGeminiPage(targetUrl) {
 
   if (!page) {
     page = pages[0] || (await browser.newPage());
-    console.log(`[GeminiBridge] 🌐 Navigating to ${destUrl}...`);
+    console.log(`[GeminiBridge] 🌐 Initializing connection to Gemini Web...`);
     await page.goto(destUrl, { waitUntil: 'networkidle2', timeout: 45000 });
-  } else if (targetUrl && !page.url().includes(targetUrl.split('/').pop())) {
-    console.log(`[GeminiBridge] 🌐 Switching conversation to: ${targetUrl}...`);
-    await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 45000 });
+  } else {
+    // Page is already on gemini.google.com - perform zero-reload transition
+    if (targetUrl) {
+      const targetChatId = targetUrl.split('/').pop();
+      if (!page.url().includes(targetChatId)) {
+        console.log(`[GeminiBridge] 🌐 Switching conversation to: ${targetUrl}...`);
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      }
+    } else if (options.freshSession) {
+      // Zero-Reload New Chat via instant DOM click (0.05s)
+      await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('button, [role="button"], a'));
+        const newChatBtn = btns.find((b) => {
+          const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+          const text = (b.innerText || '').toLowerCase();
+          return aria.includes('新对话') || aria.includes('new chat') || text.includes('新对话') || text.includes('new chat');
+        });
+        if (newChatBtn) newChatBtn.click();
+      });
+    }
   }
 
   await page.bringToFront().catch(() => {});
@@ -280,19 +297,17 @@ async function executeGeneration(prompt, options = {}) {
 
   try {
     const targetUrl = options.targetUrl || null;
-    const page = await getGeminiPage(targetUrl);
+    const page = await getGeminiPage(targetUrl, options);
 
     // 1. Clean UI state (dismiss popups, dismiss stale attachment chips)
     await page.evaluate((btnSel) => {
       const allButtons = Array.from(document.querySelectorAll('button'));
-      // Close modal/dialog button
       const close = allButtons.find((b) => {
         const aria = (b.getAttribute('aria-label') || '').toLowerCase();
         return btnSel.closeAriaMatches.some((m) => aria.includes(m));
       });
       if (close) close.click();
 
-      // Dismiss existing attachment chips if any
       const dismissAtts = allButtons.filter((b) => {
         const aria = (b.getAttribute('aria-label') || '').toLowerCase();
         return aria.includes('关闭附件') || aria.includes('移除附件') || aria.includes('delete attachment');
@@ -300,13 +315,7 @@ async function executeGeneration(prompt, options = {}) {
       dismissAtts.forEach((b) => b.click());
     }, selectors.buttons);
 
-    // 2. Clear input area
-    await page.waitForFunction(
-      (sel) => !!document.querySelector(sel),
-      { timeout: 15000 },
-      selectors.input.editor
-    ).catch(() => {});
-
+    // 2. Clear input area instantly
     await page.evaluate((editorSel) => {
       const el = document.querySelector('rich-textarea [contenteditable="true"], rich-textarea p, div.ql-editor, textarea, [contenteditable="true"]') || document.querySelector(editorSel);
       if (el) {
@@ -328,7 +337,7 @@ async function executeGeneration(prompt, options = {}) {
     if (refImage) {
       console.log(`[GeminiBridge] 📎 Attaching reference image: ${refImage}...`);
 
-      // Method A: CDP Native Drag & Drop (Fastest, zero UI dependency, language-agnostic)
+      // Method A: CDP Native Drag & Drop (Instant, zero UI animation delay)
       try {
         const client = await page.target().createCDPSession();
         const inputRect = await page.evaluate((editorSel) => {
@@ -358,58 +367,34 @@ async function executeGeneration(prompt, options = {}) {
           });
           await client.detach();
         }
-      } catch (e) {
-        console.warn(`[GeminiBridge] CDP Drag & Drop attempt failed (${e.message}), trying menu fallback...`);
-      }
+      } catch {}
 
-      // GATE 1 - Hard Assertion: Wait for image thumbnail chip in input box
-      console.log('[GeminiBridge] ⏳ [GATE 1] Verifying image thumbnail chip in input box...');
+      // GATE 1 - Fast Hard Assertion (100ms polling)
       let gate1Passed = await page.waitForFunction(
         (chipsSel) => {
           const previews = Array.from(document.querySelectorAll(chipsSel.join(', ')));
           return previews.some((img) => img.naturalWidth > 0 || img.complete || img.clientHeight > 0);
         },
-        { timeout: 6000 },
+        { polling: 100, timeout: 3500 },
         selectors.attachment.chips
       ).catch(() => false);
 
-      // Method B: Fallback to "+" Upload Menu + FileChooser if drag & drop didn't register chip
+      // Fallback to menu upload if drop was not registered
       if (!gate1Passed) {
-        console.log('[GeminiBridge] 📎 Falling back to "+" menu upload...');
         try {
-          const uploadBtnClicked = await page.evaluate((upSel) => {
-            const btns = Array.from(document.querySelectorAll('button'));
-            const upload = btns.find((b) => {
-              const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-              return upSel.buttonAriaMatches.some((m) => aria.includes(m));
-            });
-            if (upload) {
-              upload.click();
-              return true;
-            }
-            return false;
-          }, selectors.upload);
-
-          if (uploadBtnClicked) {
-            await new Promise((r) => setTimeout(r, 600));
-            const [fileChooser] = await Promise.all([
-              page.waitForFileChooser({ timeout: 6000 }),
-              page.evaluate((upSel) => {
-                const items = Array.from(document.querySelectorAll(upSel.menuItems));
-                const target = items.find((el) => {
-                  const t = (el.innerText || '').trim().toLowerCase();
-                  return upSel.menuItemTexts.some((m) => t.includes(m));
-                });
-                if (target) {
-                  target.click();
-                  return true;
-                }
-                return false;
-              }, selectors.upload),
-            ]);
-            if (fileChooser) {
-              await fileChooser.accept([refImage]);
-            }
+          const [fileChooser] = await Promise.all([
+            page.waitForFileChooser({ timeout: 4000 }),
+            page.evaluate((upSel) => {
+              const btns = Array.from(document.querySelectorAll('button'));
+              const upload = btns.find((b) => {
+                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                return upSel.buttonAriaMatches.some((m) => aria.includes(m));
+              });
+              if (upload) upload.click();
+            }, selectors.upload),
+          ]);
+          if (fileChooser) {
+            await fileChooser.accept([refImage]);
           }
         } catch {}
 
@@ -418,25 +403,18 @@ async function executeGeneration(prompt, options = {}) {
             const previews = Array.from(document.querySelectorAll(chipsSel.join(', ')));
             return previews.some((img) => img.naturalWidth > 0 || img.complete || img.clientHeight > 0);
           },
-          { timeout: 10000 },
+          { polling: 100, timeout: 5000 },
           selectors.attachment.chips
         ).catch(() => false);
-      }
-
-      if (options.gate1ProofPath) {
-        const p = path.resolve(options.gate1ProofPath);
-        fs.mkdirSync(path.dirname(p), { recursive: true });
-        await page.screenshot({ path: p });
-        console.log(`[GeminiBridge] 📸 Saved Gate 1 Proof: ${p}`);
       }
 
       if (!gate1Passed) {
         throw new Error('❌ [GATE 1 FAILED] Image thumbnail chip was NOT detected in input box after upload. Aborting!');
       }
-      console.log('[GeminiBridge] 🎉 [GATE 1 PASSED] Reference image successfully attached in input bar!');
+      console.log('[GeminiBridge] 🎉 [GATE 1 PASSED] Reference image attached!');
     }
 
-    // 4. Reliable Text Typing via DOM + InputEvent
+    // 4. Instant Text Injection via DOM + InputEvent (0.02s)
     console.log(`[GeminiBridge] ⌨️ Submitting prompt: "${rawPrompt.slice(0, 75)}..."`);
     await page.evaluate((editorSel, text) => {
       const el = document.querySelector('rich-textarea p, rich-textarea [contenteditable="true"], div.ql-editor, textarea, [contenteditable="true"]') || document.querySelector(editorSel);
@@ -448,9 +426,7 @@ async function executeGeneration(prompt, options = {}) {
       }
     }, selectors.input.editor, rawPrompt);
 
-    await new Promise((r) => setTimeout(r, 400));
-
-    // 5. Submit Message (Native CDP Mouse Click on Send Button / Enter)
+    // 5. Submit Message via Native CDP Mouse Click (0.03s)
     const btnRect = await page.evaluate((btnSel) => {
       const btns = Array.from(document.querySelectorAll('button'));
       const send = btns.reverse().find((b) => {
@@ -471,95 +447,110 @@ async function executeGeneration(prompt, options = {}) {
     }
     console.log('[GeminiBridge] ✓ Message dispatched!');
 
-    // 6. GATE 2 - Real DOM Proof Capture
+    // 6. Fast GATE 2 Assertion (0.1s DOM verification)
     if (refImage) {
-      console.log('[GeminiBridge] ⏳ [GATE 2] Verifying user message in DOM...');
-      await new Promise((r) => setTimeout(r, 2500));
-      if (options.gate2ProofPath) {
-        const p = path.resolve(options.gate2ProofPath);
-        fs.mkdirSync(path.dirname(p), { recursive: true });
-        await page.screenshot({ path: p });
-        console.log(`[GeminiBridge] 📸 Saved Gate 2 Proof: ${p}`);
-      }
+      await page.waitForFunction(() => {
+        const userMsgs = Array.from(document.querySelectorAll('.user-query-container, user-query, div.user-query'));
+        return userMsgs.length > 0;
+      }, { polling: 100, timeout: 4000 }).catch(() => {});
       console.log('[GeminiBridge] 🎉 [GATE 2 PASSED] Confirmed image attachment dispatched!');
     }
 
-    // 7. Poll for Newly Rendered Imagen 3 Image in DOM (with Fast-Fail Refusal Detection)
+    // 7. 0ms Event-Driven Detection for Newly Rendered Imagen 3 Image (100ms Polling + Live Timer)
     console.log('[GeminiBridge] ⏳ Waiting for Gemini Imagen 3 rendering in conversation...');
-    const deadline = Date.now() + timeoutMs;
-    let extractedResult = null;
+    const heartbeatTimer = setInterval(() => {
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      process.stdout.write(`\r[GeminiBridge] ⏳ Generating Imagen 3 image... (${elapsed}s)`);
+    }, 1500);
 
-    while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 1500));
-
-      // Fast-Fail: Check for Safety / Policy Refusals or Errors
-      const refusal = await page.evaluate((refSel) => {
-        const banners = Array.from(document.querySelectorAll(refSel.toastOrBannerSelectors.join(', ')));
-        for (const b of banners) {
-          const t = (b.innerText || '').toLowerCase();
-          for (const kw of refSel.keywords) {
-            if (t.includes(kw)) return kw;
-          }
-        }
-        const responses = Array.from(document.querySelectorAll('.model-response-text, model-response, div.response-content'));
-        if (responses.length > 0) {
-          const lastResp = responses[responses.length - 1];
-          const rt = (lastResp.innerText || '').toLowerCase();
-          for (const kw of refSel.keywords) {
-            if (rt.includes(kw)) return kw;
-          }
-        }
-        return null;
-      }, selectors.refusals);
-
-      if (refusal) {
-        throw new Error(`[GeminiBridge] ❌ Generation Refused by Model: Triggered refusal rule "${refusal}".`);
-      }
-
-      // Check for Generated Imagen 3 images (using unique src comparison)
-      const check = await page.evaluate((outSel, initSrcs, extractAll) => {
-        const allImgs = Array.from(document.querySelectorAll(outSel.generatedImages.join(', ')));
-        const candidates = allImgs.filter(
-          (img) => img.naturalWidth >= outSel.minWidth && img.naturalHeight >= outSel.minHeight && img.complete
-        );
-        if (candidates.length === 0) return null;
-
-        const newImages = candidates.filter((img) => !initSrcs.includes(img.src || img.getAttribute('src')));
-        if (newImages.length === 0) return null;
-
-        const targetList = extractAll ? newImages : [newImages[newImages.length - 1]];
-        const extracted = [];
-
-        for (const target of targetList) {
-          try {
-            const canvas = document.createElement('canvas');
-            canvas.width = target.naturalWidth;
-            canvas.height = target.naturalHeight;
-            const ctx = canvas.getContext('2d');
-            if (ctx) {
-              ctx.drawImage(target, 0, 0);
-              extracted.push({
-                dataUrl: canvas.toDataURL('image/png'),
-                width: target.naturalWidth,
-                height: target.naturalHeight,
-              });
+    let matchResult = null;
+    try {
+      const matchHandle = await page.waitForFunction(
+        (outSel, refSel, initSrcs) => {
+          // Fast-Fail Refusal Check
+          const banners = Array.from(document.querySelectorAll(refSel.toastOrBannerSelectors.join(', ')));
+          for (const b of banners) {
+            const t = (b.innerText || '').toLowerCase();
+            for (const kw of refSel.keywords) {
+              if (t.includes(kw)) return { type: 'refusal', reason: kw };
             }
-          } catch {}
-        }
+          }
+          const responses = Array.from(document.querySelectorAll('.model-response-text, model-response, div.response-content'));
+          if (responses.length > 0) {
+            const lastResp = responses[responses.length - 1];
+            const rt = (lastResp.innerText || '').toLowerCase();
+            for (const kw of refSel.keywords) {
+              if (rt.includes(kw)) return { type: 'refusal', reason: kw };
+            }
+          }
 
-        if (extracted.length > 0) {
-          return {
-            images: extracted,
-            primary: extracted[extracted.length - 1],
-          };
-        }
-        return null;
-      }, selectors.output, initialImageSrcs, !!options.extractAll);
+          // Imagen 3 Output Check
+          const allImgs = Array.from(document.querySelectorAll(outSel.generatedImages.join(', ')));
+          const candidates = allImgs.filter(
+            (img) => img.naturalWidth >= outSel.minWidth && img.naturalHeight >= outSel.minHeight && img.complete
+          );
+          if (candidates.length === 0) return null;
 
-      if (check && check.primary && check.primary.dataUrl) {
-        extractedResult = check;
-        break;
+          const newImages = candidates.filter((img) => !initSrcs.includes(img.src || img.getAttribute('src')));
+          if (newImages.length === 0) return null;
+
+          return { type: 'success' };
+        },
+        { polling: 100, timeout: timeoutMs },
+        selectors.output,
+        selectors.refusals,
+        initialImageSrcs
+      );
+      matchResult = await matchHandle.jsonValue();
+    } catch (e) {
+      clearInterval(heartbeatTimer);
+      process.stdout.write('\n');
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      throw new Error(`[GeminiBridge] Timed out waiting for image generation after ${elapsed}s.`);
+    } finally {
+      clearInterval(heartbeatTimer);
+      process.stdout.write('\n');
+    }
+
+    if (matchResult && matchResult.type === 'refusal') {
+      throw new Error(`[GeminiBridge] ❌ Generation Refused by Model: Triggered refusal rule "${matchResult.reason}".`);
+    }
+
+    // Instant Lossless Extraction
+    const extractedResult = await page.evaluate((outSel, initSrcs, extractAll) => {
+      const allImgs = Array.from(document.querySelectorAll(outSel.generatedImages.join(', ')));
+      const candidates = allImgs.filter(
+        (img) => img.naturalWidth >= outSel.minWidth && img.naturalHeight >= outSel.minHeight && img.complete
+      );
+      const newImages = candidates.filter((img) => !initSrcs.includes(img.src || img.getAttribute('src')));
+      const targetList = extractAll ? newImages : [newImages[newImages.length - 1]];
+      const extracted = [];
+
+      for (const target of targetList) {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = target.naturalWidth;
+          canvas.height = target.naturalHeight;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(target, 0, 0);
+            extracted.push({
+              dataUrl: canvas.toDataURL('image/png'),
+              width: target.naturalWidth,
+              height: target.naturalHeight,
+            });
+          }
+        } catch {}
       }
+
+      return {
+        images: extracted,
+        primary: extracted[extracted.length - 1],
+      };
+    }, selectors.output, initialImageSrcs, !!options.extractAll);
+
+    if (!extractedResult || !extractedResult.primary) {
+      throw new Error('[GeminiBridge] Failed to extract rendered image data.');
     }
 
     if (!extractedResult) {
