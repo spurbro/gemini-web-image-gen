@@ -260,6 +260,13 @@ async function getGeminiPage(targetUrl, options = {}) {
   }
 
   await page.bringToFront().catch(() => {});
+  page.removeAllListeners('close');
+  page.removeAllListeners('error');
+  page.on('close', () => { activePage = null; });
+  page.on('error', (err) => { console.error(`[GeminiBridge] 🚨 Page crash/error: ${err.message}`); activePage = null; });
+  browser.removeAllListeners('disconnected');
+  browser.on('disconnected', () => { activeBrowser = null; activePage = null; });
+
   activePage = page;
   return page;
 }
@@ -414,7 +421,7 @@ async function executeGeneration(prompt, options = {}) {
       console.log('[GeminiBridge] 🎉 [GATE 1 PASSED] Reference image attached!');
     }
 
-    // 4. Instant Text Injection via DOM + InputEvent (0.02s)
+    // 4. Reliable Text Injection via DOM + InputEvent (with form validation triggers)
     console.log(`[GeminiBridge] ⌨️ Submitting prompt: "${rawPrompt.slice(0, 75)}..."`);
     await page.evaluate((editorSel, text) => {
       const el = document.querySelector('rich-textarea p, rich-textarea [contenteditable="true"], div.ql-editor, textarea, [contenteditable="true"]') || document.querySelector(editorSel);
@@ -423,29 +430,55 @@ async function executeGeneration(prompt, options = {}) {
         document.execCommand('insertText', false, text);
         el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Enter' }));
       }
     }, selectors.input.editor, rawPrompt);
 
-    // 5. Submit Message via Native CDP Mouse Click (0.03s)
-    const btnRect = await page.evaluate((btnSel) => {
-      const btns = Array.from(document.querySelectorAll('button'));
-      const send = btns.reverse().find((b) => {
-        const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-        return (aria === '发送' || aria === 'send' || aria.includes('发送提示') || btnSel.sendAriaMatches.some((m) => aria.includes(m))) && !b.disabled;
-      });
-      if (send) {
-        const r = send.getBoundingClientRect();
-        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-      }
-      return null;
-    }, selectors.buttons);
+    // 5. Active Dispatch Assertion with Auto-Retry Compensation (Max 3 retries over 3s)
+    let dispatched = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const btnRect = await page.evaluate((btnSel) => {
+        const btns = Array.from(document.querySelectorAll('button'));
+        const send = btns.reverse().find((b) => {
+          const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+          return (aria === '发送' || aria === 'send' || aria.includes('发送提示') || btnSel.sendAriaMatches.some((m) => aria.includes(m)));
+        });
+        if (send) {
+          send.removeAttribute('disabled');
+          const r = send.getBoundingClientRect();
+          return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        }
+        return null;
+      }, selectors.buttons);
 
-    if (btnRect && btnRect.x > 0 && btnRect.y > 0) {
-      await page.mouse.click(btnRect.x, btnRect.y);
-    } else {
-      await page.keyboard.press('Enter');
+      if (btnRect && btnRect.x > 0 && btnRect.y > 0) {
+        await page.mouse.click(btnRect.x, btnRect.y);
+      }
+
+      // Also trigger Enter on focused editor element
+      const editorEl = await page.$('rich-textarea p, rich-textarea [contenteditable="true"], div.ql-editor, textarea, [contenteditable="true"]');
+      if (editorEl) {
+        await editorEl.focus().catch(() => {});
+        await page.keyboard.press('Enter');
+      }
+
+      // Verify dispatch confirmation (Editor cleared OR response generating indicator appeared)
+      dispatched = await page.waitForFunction((editorSel) => {
+        const el = document.querySelector('rich-textarea p, rich-textarea [contenteditable="true"], div.ql-editor, textarea, [contenteditable="true"]') || document.querySelector(editorSel);
+        const textEmpty = !el || (el.innerText || el.textContent || el.value || '').trim() === '';
+        const isGenerating = !!document.querySelector('button[aria-label*="停止"], button[aria-label*="Stop"], .sparkle-image, .generating-spinner, model-response, .model-response-text');
+        return textEmpty || isGenerating;
+      }, { polling: 100, timeout: 1200 }, selectors.input.editor).catch(() => false);
+
+      if (dispatched) break;
+      console.warn(`[GeminiBridge] ⚠️ Dispatch attempt ${attempt} unconfirmed, retrying immediately...`);
+      await new Promise((r) => setTimeout(r, 200));
     }
-    console.log('[GeminiBridge] ✓ Message dispatched!');
+
+    if (!dispatched) {
+      throw new Error('[GeminiBridge] ❌ [DISPATCH_FAILED] Message could not be submitted to Gemini within 4s. Circuit breaker activated to prevent hanging.');
+    }
+    console.log('[GeminiBridge] ✓ Message dispatched and confirmed!');
 
     // 6. Fast GATE 2 Assertion (0.1s DOM verification)
     if (refImage) {
